@@ -1737,6 +1737,12 @@ def render_signal_ai_panel():
 # Telegram
 # ══════════════════════════════════════════════════════════════════════════════
 def send_telegram(msg: str):
+    # 雙重防護：沒有活躍股票時，一律不發送
+    try:
+        if not st.session_state.get("_active_symbols"):
+            return
+    except Exception:
+        return
     try:
         token   = st.secrets["TELEGRAM_BOT_TOKEN"]
         chat_id = st.secrets["TELEGRAM_CHAT_ID"]
@@ -2386,6 +2392,14 @@ def run_alerts(symbol, period_label, df, trigger_ai=False, mkt=None):
     A. 趨勢正在形成  B. 趨勢已確立
     C. 趨勢反轉訊號  D. 原有突破（支撐/阻力）
     """
+    # 防護：symbol 必須在目前活躍監控列表中，否則拒絕執行（防止空輸入時觸發）
+    import re as _re_guard
+    if not symbol or not _re_guard.match(r'^[A-Z\.\-]{1,10}$', str(symbol)):
+        return
+    _active = st.session_state.get("_active_symbols", [])
+    if _active and symbol not in _active:
+        return
+
     if len(df) < 35: return
 
     close  = df["Close"]
@@ -3697,12 +3711,16 @@ with st.sidebar:
     st.title("📈 美股監控系統")
     st.markdown("---")
 
-    raw_input = st.text_area("股票代號（空格分隔）", value="TSLA AAPL NVDA", height=80)
+    raw_input = st.text_area("股票代號（空格分隔，例：TSLA AAPL NVDA）", value="", height=80,
+                             key="symbol_input_area",
+                             placeholder="TSLA AAPL NVDA")
     # 同時支援空格、逗號、換行、全形逗號分隔
     import re as _re
     symbols = [s.strip().upper() for s in _re.split(r'[\s,，\n]+', raw_input) if s.strip()]
     # 過濾非法代號（只允許字母和.）
     symbols = [s for s in symbols if _re.match(r'^[A-Z\.\-]{1,10}$', s)]
+    # 同步到 session_state 讓 send_telegram 能檢查
+    st.session_state["_active_symbols"] = symbols
 
     st.markdown("---")
     st.markdown("#### 📅 監控模式")
@@ -3808,8 +3826,8 @@ with st.sidebar:
 st.title("🇺🇸 美股即時監控系統")
 
 if not symbols:
+    st.session_state["_active_symbols"] = []   # 立即清空，阻止任何後續發送
     st.info("👈 請在左側輸入股票代號（例如：TSLA AAPL NVDA）")
-    # 空白時也要停止自動刷新，否則會空跑
     if auto_refresh:
         time.sleep(refresh_sec)
         st.cache_data.clear()
