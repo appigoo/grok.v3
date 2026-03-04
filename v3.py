@@ -3618,10 +3618,159 @@ def build_chart(symbol, df, interval_label, compact=False, max_bars=90, ext_data
 # ══════════════════════════════════════════════════════════════════════════════
 # 多週期摘要列
 # ══════════════════════════════════════════════════════════════════════════════
+def _render_mtf_confluence(symbol: str, mtf_data: dict):
+    """
+    多週期共振分析：短週期 + 長週期信號一致時，信號可靠性大幅提升。
+    評分系統：每個條件 +1（多頭）或 -1（空頭），綜合判斷方向與強度。
+    """
+    if len(mtf_data) < 2:
+        return
+
+    # ── 1. 計算每個週期的多/空傾向分數 ──────────────────────────────────────
+    # 週期權重：越長週期權重越高（長線決定方向）
+    weight_map = {"1m": 1, "5m": 2, "15m": 3, "30m": 4,
+                  "1d": 6, "1wk": 8, "1mo": 10}
+
+    bull_score = 0
+    bear_score = 0
+    total_weight = 0
+    period_signals = []
+
+    for itvl, d in mtf_data.items():
+        w = weight_map.get(itvl, 2)
+        total_weight += w
+
+        # 每週期評分項目
+        s = 0
+        reasons = []
+        if d["trend"] == "多頭":    s += 2; reasons.append("多頭排列")
+        elif d["trend"] == "空頭":  s -= 2; reasons.append("空頭排列")
+        if d["dif"] > d["dea"]:     s += 1; reasons.append("MACD多方")
+        else:                        s -= 1; reasons.append("MACD空方")
+        # MACD 金叉/死叉（剛發生）
+        if d["dif"] > d["dea"] and d["dif_prev"] <= d["dea_prev"]:
+            s += 2; reasons.append("剛金叉✨")
+        elif d["dif"] < d["dea"] and d["dif_prev"] >= d["dea_prev"]:
+            s -= 2; reasons.append("剛死叉💀")
+        if d["ema5"] > d["ema20"]:  s += 1; reasons.append("短均多頭")
+        else:                        s -= 1; reasons.append("短均空頭")
+
+        bull_score += max(0, s) * w
+        bear_score += max(0, -s) * w
+        period_signals.append({
+            "itvl": itvl, "label": d["label"],
+            "score": s, "w": w, "reasons": reasons
+        })
+
+    # ── 2. 共振強度計算 ────────────────────────────────────────────────────
+    max_possible = total_weight * 5   # 每週期最高 5 分
+    bull_pct = bull_score / max_possible * 100
+    bear_pct = bear_score / max_possible * 100
+    net_pct  = bull_pct - bear_pct    # 正=多頭優勢，負=空頭優勢
+
+    # 判斷共振等級
+    # 各週期方向一致性（一致 = 共振強，分歧 = 信號弱）
+    bull_periods = sum(1 for p in period_signals if p["score"] > 0)
+    bear_periods = sum(1 for p in period_signals if p["score"] < 0)
+    total_periods = len(period_signals)
+    consensus_ratio = max(bull_periods, bear_periods) / total_periods if total_periods else 0
+
+    if net_pct > 25 and consensus_ratio >= 0.75:
+        confluence_label = "🚀 強烈多頭共振"
+        bar_color = "#00ff88"
+        bg_color  = "rgba(0,60,30,0.5)"
+        direction = "LONG"
+    elif net_pct > 10 and consensus_ratio >= 0.6:
+        confluence_label = "📈 多頭偏向"
+        bar_color = "#44cc88"
+        bg_color  = "rgba(0,40,20,0.4)"
+        direction = "偏多"
+    elif net_pct < -25 and consensus_ratio >= 0.75:
+        confluence_label = "💀 強烈空頭共振"
+        bar_color = "#ff4444"
+        bg_color  = "rgba(60,0,0,0.5)"
+        direction = "SHORT"
+    elif net_pct < -10 and consensus_ratio >= 0.6:
+        confluence_label = "📉 空頭偏向"
+        bar_color = "#cc4444"
+        bg_color  = "rgba(40,0,0,0.4)"
+        direction = "偏空"
+    else:
+        confluence_label = "⚖️ 多空分歧，觀望"
+        bar_color = "#888888"
+        bg_color  = "rgba(30,30,30,0.4)"
+        direction = "中性"
+
+    # ── 3. 短週期 vs 長週期背離偵測 ──────────────────────────────────────
+    divergence_msg = ""
+    itvl_keys = list(mtf_data.keys())
+    if len(itvl_keys) >= 2:
+        short_itvl = itvl_keys[0]   # 最短週期（如 1m）
+        long_itvl  = itvl_keys[-1]  # 最長週期（如 30m）
+        short_score = next(p["score"] for p in period_signals if p["itvl"] == short_itvl)
+        long_score  = next(p["score"] for p in period_signals if p["itvl"] == long_itvl)
+        short_label = mtf_data[short_itvl]["label"]
+        long_label  = mtf_data[long_itvl]["label"]
+        if short_score > 1 and long_score < -1:
+            divergence_msg = f"⚠️ 背離警告：{short_label} 偏多 但 {long_label} 偏空 → 短多不可靠，等長週期轉向"
+        elif short_score < -1 and long_score > 1:
+            divergence_msg = f"💡 反彈機會：{short_label} 偏空 但 {long_label} 偏多 → 短空可能是回調，長線仍多"
+
+    # ── 4. 渲染共振面板 ────────────────────────────────────────────────────
+    bar_w  = min(100, abs(net_pct) * 2)
+    bar_dir = "left" if net_pct >= 0 else "right"
+
+    rows_html = ""
+    for p in period_signals:
+        _s    = p["score"]
+        _col  = "#00cc66" if _s > 0 else ("#ff4444" if _s < 0 else "#888888")
+        _icon = "▲" if _s > 2 else ("△" if _s > 0 else ("▽" if _s < 0 else "▼" if _s < -2 else "◆"))
+        _reasons = " · ".join(p["reasons"][:3])
+        rows_html += (
+            f'<div style="display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid #1a2535;">'
+            f'  <span style="color:#6688aa;min-width:38px;font-size:0.78rem;">{p["label"]}</span>'
+            f'  <span style="color:{_col};font-weight:700;min-width:20px;">{_icon}</span>'
+            f'  <div style="flex:1;background:#0d1520;border-radius:3px;height:5px;">'
+            f'    <div style="width:{min(100,abs(_s)*20)}%;height:100%;background:{_col};border-radius:3px;'
+            f'         margin-{"left" if _s >= 0 else "right"}:{"0" if _s >= 0 else "auto"};"></div>'
+            f'  </div>'
+            f'  <span style="color:#445566;font-size:0.7rem;min-width:140px;">{_reasons}</span>'
+            f'</div>'
+        )
+
+    div_html = (
+        f'<div style="background:#0d1a2d;border:1px solid #1e3050;border-radius:8px;padding:12px 16px;margin:10px 0;">'
+        f'  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">'
+        f'    <span style="font-weight:700;font-size:1rem;color:#cce8ff;">🔗 多週期共振分析</span>'
+        f'    <span style="background:{bar_color}22;border:1px solid {bar_color}55;'
+        f'          color:{bar_color};padding:3px 10px;border-radius:12px;font-weight:700;">'
+        f'      {confluence_label}</span>'
+        f'  </div>'
+        f'  <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;">'
+        f'    <span style="color:#445566;font-size:0.75rem;">空頭</span>'
+        f'    <div style="flex:1;background:#0d1520;border-radius:4px;height:8px;position:relative;">'
+        f'      <div style="width:50%;height:100%;background:#1e2e40;position:absolute;left:0;"></div>'
+        f'      <div style="width:{bar_w/2}%;height:100%;background:{bar_color};border-radius:4px;'
+        f'           position:absolute;{"left:50%" if net_pct>=0 else f"left:{50-bar_w/2}%"};"></div>'
+        f'      <div style="width:1px;height:100%;background:#445566;position:absolute;left:50%;"></div>'
+        f'    </div>'
+        f'    <span style="color:#445566;font-size:0.75rem;">多頭</span>'
+        f'    <span style="color:{bar_color};font-weight:700;min-width:60px;text-align:right;">'
+        f'      {direction} {abs(net_pct):.0f}%</span>'
+        f'  </div>'
+        f'  {rows_html}'
+        + (f'  <div style="margin-top:8px;padding:6px 10px;background:#1a2030;border-radius:5px;'
+           f'       color:#ffaa44;font-size:0.8rem;">{divergence_msg}</div>' if divergence_msg else '')
+        + f'</div>'
+    )
+    st.markdown(div_html, unsafe_allow_html=True)
+
+
 def render_mtf_summary(symbol, selected_intervals, show_alerts, prepost=False):
     st.markdown(f'<div class="mtf-section-title">🔀 多週期總覽 — {symbol}</div>',
                 unsafe_allow_html=True)
-    rows = []
+    rows    = []
+    mtf_data = {}   # {itvl: {"df": df, "label": label, "trend": trend, ...}}
     for itvl in selected_intervals:
         label, _ = INTERVAL_MAP[itvl]
         df = fetch_data(symbol, itvl, prepost=prepost)
@@ -3670,6 +3819,24 @@ def render_mtf_summary(symbol, selected_intervals, show_alerts, prepost=False):
         else:
             compress_tag = f'<span style="color:#445566;">分散{_compress:.2f}%</span>'
 
+        # 收集多週期數據供共振分析
+        _dif, _dea, _ = calc_macd(df["Close"])
+        mtf_data[itvl] = {
+            "label":    label,
+            "df":       df,
+            "trend":    trend,
+            "macd_s":   macd_s,
+            "dif":      float(_dif.iloc[-1]),
+            "dea":      float(_dea.iloc[-1]),
+            "dif_prev": float(_dif.iloc[-2]) if len(_dif) > 1 else float(_dif.iloc[-1]),
+            "dea_prev": float(_dea.iloc[-2]) if len(_dea) > 1 else float(_dea.iloc[-1]),
+            "close":    float(df["Close"].iloc[-1]),
+            "compress": _compress,
+            "ema5":     _ema_vs[0],
+            "ema20":    float(calc_ema(df["Close"], 20).iloc[-1]),
+            "ema60":    float(calc_ema(df["Close"], 60).iloc[-1]),
+        }
+
         rows.append(
             f'<div class="mtf-header">'
             f'  <span class="mtf-period">{label}</span>'
@@ -3688,6 +3855,10 @@ def render_mtf_summary(symbol, selected_intervals, show_alerts, prepost=False):
             f'</div>'
         )
     st.markdown("".join(rows), unsafe_allow_html=True)
+
+    # ── 多週期共振分析（跨週期連動預測）────────────────────────────────────
+    if len(mtf_data) >= 2:
+        _render_mtf_confluence(symbol, mtf_data)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 多週期 K 線圖
