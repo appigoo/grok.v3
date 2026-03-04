@@ -2115,15 +2115,20 @@ def render_extended_session(symbol: str, show_pre: bool, show_post: bool, show_n
         '</div></div>',
         unsafe_allow_html=True)
 
-def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
+def fetch_data(symbol: str, interval: str, prepost: bool = False) -> pd.DataFrame:
     _, period = INTERVAL_MAP[interval]
     try:
+        # 分鐘/小時級別支援盤前盤後，日K以上不需要
+        _prepost = prepost and interval in ("1m","5m","15m","30m","1h","2h","4h")
         df = yf.download(symbol, period=period, interval=interval,
-                         auto_adjust=True, progress=False)
+                         auto_adjust=True, progress=False,
+                         prepost=_prepost)
         if df.empty:
             return pd.DataFrame()
         df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
         df.dropna(inplace=True)
+        # 確保時間排序正確（盤前數據時間早於正規時段）
+        df = df.sort_index()
         return df
     except Exception:
         return pd.DataFrame()
@@ -3160,13 +3165,55 @@ def build_chart(symbol, df, interval_label, compact=False, max_bars=90, ext_data
         ann.font.size  = ann_size
         ann.font.color = "#ccddee"
 
-    # K 線
-    fig.add_trace(go.Candlestick(
-        x=xlabels, open=df["Open"], high=df["High"], low=df["Low"], close=close,
-        increasing_line_color="#00cc44", increasing_fillcolor="#00cc44",
-        decreasing_line_color="#ff4444", decreasing_fillcolor="#ff4444",
-        name="K線", showlegend=False,
-    ), row=1, col=1)
+    # K 線：區分正規時段（綠/紅）和延長時段（藍/紫）
+    try:
+        import pytz as _pytz
+        _et = _pytz.timezone("America/New_York")
+        _idx_et = df.index.tz_convert(_et) if df.index.tzinfo else df.index.tz_localize("UTC").tz_convert(_et)
+        def _is_regular(t):
+            return (t.hour > 9 or (t.hour == 9 and t.minute >= 30)) and t.hour < 16
+        _reg_mask = [_is_regular(t) for t in _idx_et]
+        _ext_mask = [not m for m in _reg_mask]
+    except Exception:
+        _reg_mask = [True] * len(df)
+        _ext_mask = [False] * len(df)
+
+    _has_ext = any(_ext_mask)
+
+    if _has_ext:
+        # 正規時段 K 線
+        _reg_idx = [i for i,m in enumerate(_reg_mask) if m]
+        if _reg_idx:
+            fig.add_trace(go.Candlestick(
+                x=[xlabels[i] for i in _reg_idx],
+                open=[df["Open"].iloc[i]  for i in _reg_idx],
+                high=[df["High"].iloc[i]  for i in _reg_idx],
+                low= [df["Low"].iloc[i]   for i in _reg_idx],
+                close=[df["Close"].iloc[i] for i in _reg_idx],
+                increasing_line_color="#00cc44", increasing_fillcolor="#00cc44",
+                decreasing_line_color="#ff4444", decreasing_fillcolor="#ff4444",
+                name="正規時段", showlegend=True,
+            ), row=1, col=1)
+        # 延長時段 K 線（藍/紫色）
+        _ext_idx = [i for i,m in enumerate(_ext_mask) if m]
+        if _ext_idx:
+            fig.add_trace(go.Candlestick(
+                x=[xlabels[i] for i in _ext_idx],
+                open=[df["Open"].iloc[i]  for i in _ext_idx],
+                high=[df["High"].iloc[i]  for i in _ext_idx],
+                low= [df["Low"].iloc[i]   for i in _ext_idx],
+                close=[df["Close"].iloc[i] for i in _ext_idx],
+                increasing_line_color="#3399ff", increasing_fillcolor="#3399ff",
+                decreasing_line_color="#9944ff", decreasing_fillcolor="#9944ff",
+                name="延長時段", showlegend=True, opacity=0.85,
+            ), row=1, col=1)
+    else:
+        fig.add_trace(go.Candlestick(
+            x=xlabels, open=df["Open"], high=df["High"], low=df["Low"], close=close,
+            increasing_line_color="#00cc44", increasing_fillcolor="#00cc44",
+            decreasing_line_color="#ff4444", decreasing_fillcolor="#ff4444",
+            name="K線", showlegend=False,
+        ), row=1, col=1)
 
     # ── 盤前/盤後 K 線疊加（Yahoo Finance 延長時段）───────────────────────
     if ext_data:
@@ -3628,8 +3675,9 @@ def render_mtf_charts(symbol, selected_intervals, layout_mode, max_bars=90):
 # ══════════════════════════════════════════════════════════════════════════════
 def render_single(symbol, interval, show_alerts, max_bars=90, show_pre=False, show_post=False, show_night=False):
     label, _ = INTERVAL_MAP[interval]
+    _prepost = show_pre or show_post or show_night
     with st.spinner(f"載入 {symbol} {label} 數據中..."):
-        df = fetch_data(symbol, interval)
+        df = fetch_data(symbol, interval, prepost=_prepost)
 
     if df.empty:
         st.error(f"❌ 無法取得 {symbol} 數據")
