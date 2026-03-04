@@ -3737,6 +3737,34 @@ def render_single(symbol, interval, show_alerts, max_bars=90, show_pre=False, sh
     vol_now = int(df["Volume"].iloc[-1])
     trend   = detect_trend(df)
 
+    # 判斷最新數據時間和時段
+    try:
+        import pytz as _ptz
+        _et = _ptz.timezone("America/New_York")
+        _last_ts = df.index[-1]
+        if _last_ts.tzinfo is None:
+            _last_ts = _last_ts.tz_localize("UTC").tz_convert(_et)
+        else:
+            _last_ts = _last_ts.tz_convert(_et)
+        _h, _m = _last_ts.hour, _last_ts.minute
+        if (_h > 9 or (_h == 9 and _m >= 30)) and _h < 16:
+            _session_label = "🟢 正規盤中"
+            _session_color = "#00cc44"
+        elif _h >= 4 and (_h < 9 or (_h == 9 and _m < 30)):
+            _session_label = "🔵 盤前"
+            _session_color = "#3399ff"
+        elif _h >= 16 and _h < 20:
+            _session_label = "🟡 盤後"
+            _session_color = "#ffcc00"
+        else:
+            _session_label = "🌙 夜盤"
+            _session_color = "#aa88ff"
+        _data_time_str = _last_ts.strftime("%m/%d %H:%M ET")
+    except Exception:
+        _session_label = ""
+        _session_color = "#888888"
+        _data_time_str = ""
+
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("最新價格",      f"${last:.2f}", f"{chg:+.2f} ({pct:+.2f}%)")
     c2.metric("成交量（萬股）", f"{vol_now/10000:.1f}")
@@ -3747,8 +3775,28 @@ def render_single(symbol, interval, show_alerts, max_bars=90, show_pre=False, sh
     with c5:
         st.markdown(
             f'<div class="trend-card"><div class="trend-title">趨勢判斷</div>'
-            f'<div class="{t_cls}">{t_icon} {trend}</div></div>',
+            f'<div class="{t_cls}">{t_icon} {trend}</div>'
+            f'<div style="font-size:0.68rem;color:{_session_color};margin-top:3px;">'
+            f'{_session_label}</div>'
+            f'<div style="font-size:0.62rem;color:#445566;">{_data_time_str}</div>'
+            f'</div>',
             unsafe_allow_html=True)
+
+    # 如果數據時間超過 15 分鐘，提示用戶刷新
+    try:
+        from datetime import datetime as _dtnow, timezone as _tz
+        _now_et = datetime.now(_ptz.timezone("America/New_York"))
+        _age_min = (_now_et - _last_ts).total_seconds() / 60
+        if _age_min > 15 and _prepost:
+            col_warn, col_btn = st.columns([3, 1])
+            with col_warn:
+                st.warning(f"⚠️ 數據時間：{_data_time_str}（{_age_min:.0f} 分鐘前），可能非最新盤前數據")
+            with col_btn:
+                if st.button("🔄 強制刷新", key=f"force_refresh_{symbol}_{interval}"):
+                    st.cache_data.clear()
+                    st.rerun()
+    except Exception:
+        pass
 
     # EMA 列
     items = []
@@ -3905,6 +3953,11 @@ with st.sidebar:
         st.session_state.alert_log   = []
         st.session_state.sent_alerts = set()
         st.toast("警示記錄已清除")
+
+    if st.button("🔄 強制刷新數據快取"):
+        st.cache_data.clear()
+        st.toast("快取已清除，下次刷新將重新抓取最新數據")
+        st.rerun()
 
     if st.session_state.alert_log:
         csv_data = pd.DataFrame(st.session_state.alert_log).to_csv(
