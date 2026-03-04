@@ -2836,9 +2836,12 @@ def run_alerts(symbol, period_label, df, trigger_ai=False, mkt=None):
             return idx_val.strftime("%Y%m%d") if hasattr(idx_val, "strftime") else str(idx_val)[:10]
 
         # ── 掃描最近 scan_bars 根 K 線（含當根）─────────────────────────────
+        # 規則：只有最新根（scan_i==1）才真正發出警示和Telegram
+        #       歷史根只靜默記錄到 sent_alerts（防止重啟後重複發送），不發通知
         for scan_i in range(scan_bars, 0, -1):
-            bar_i      = -scan_i          # 被掃描根（0=最新）
+            bar_i      = -scan_i          # 被掃描根（-1=最新）
             prev_i     = -(scan_i + 1)    # 前一根
+            is_latest  = (scan_i == 1)    # 只有最新根才真正通知
 
             if abs(prev_i) > len(df): continue
 
@@ -2874,44 +2877,47 @@ def run_alerts(symbol, period_label, df, trigger_ai=False, mkt=None):
                 ck = f"{symbol}|{period_label}|跳空上漲|{bar_date}"
                 if ck not in st.session_state.sent_alerts:
                     st.session_state.sent_alerts.add(ck)
-                    tags = [f"缺口+{gap_up_pct:.2f}%", f"量×{vol_ratio:.1f}"]
-                    if vol_strong:                  tags.append("強放量")
-                    if is_bull_bar:                 tags.append("陽線確認")
-                    if in_bull_trend:               tags.append("多頭趨勢")
-                    if dif.iloc[-1] > dea.iloc[-1]: tags.append("MACD多方")
-                    strength = "🔔 【強烈買入】" if vol_strong and is_bull_bar else "🟢 【買入訊號】"
-                    add_alert(symbol, period_label,
-                              f"{strength}跳空上漲 +{gap_up_pct:.2f}%"
-                              f"（開{b_open:.2f} 前高{p_high:.2f}）"
-                              f" 放量×{vol_ratio:.1f}｜{'＋'.join(tags)}", "bull")
-                    new_signals.append(f"跳空上漲{gap_up_pct:.2f}%")
+                    if is_latest:   # 只有最新根才發通知
+                        tags = [f"缺口+{gap_up_pct:.2f}%", f"量×{vol_ratio:.1f}"]
+                        if vol_strong:                  tags.append("強放量")
+                        if is_bull_bar:                 tags.append("陽線確認")
+                        if in_bull_trend:               tags.append("多頭趨勢")
+                        if dif.iloc[-1] > dea.iloc[-1]: tags.append("MACD多方")
+                        strength = "🔔 【強烈買入】" if vol_strong and is_bull_bar else "🟢 【買入訊號】"
+                        add_alert(symbol, period_label,
+                                  f"{strength}跳空上漲 +{gap_up_pct:.2f}%"
+                                  f"（開{b_open:.2f} 前高{p_high:.2f}）"
+                                  f" 放量×{vol_ratio:.1f}｜{'＋'.join(tags)}", "bull")
+                        new_signals.append(f"跳空上漲{gap_up_pct:.2f}%")
 
             # ── F2. 向上跳空無放量 ───────────────────────────────────────
             elif gap_up_pct >= 0.3 and not vol_surge:
                 ck = f"{symbol}|{period_label}|跳空無量|{bar_date}"
                 if ck not in st.session_state.sent_alerts:
                     st.session_state.sent_alerts.add(ck)
-                    add_alert(symbol, period_label,
-                              f"⚠️ 跳空上漲 +{gap_up_pct:.2f}%"
-                              f"（開{b_open:.2f} 前高{p_high:.2f}）"
-                              f" 量能僅×{vol_ratio:.1f}，注意假突破", "info")
-                    new_signals.append(f"跳空無量{gap_up_pct:.2f}%")
+                    if is_latest:
+                        add_alert(symbol, period_label,
+                                  f"⚠️ 跳空上漲 +{gap_up_pct:.2f}%"
+                                  f"（開{b_open:.2f} 前高{p_high:.2f}）"
+                                  f" 量能僅×{vol_ratio:.1f}，注意假突破", "info")
+                        new_signals.append(f"跳空無量{gap_up_pct:.2f}%")
 
             # ── F3. 向下跳空 + 放量 ──────────────────────────────────────
             if gap_dn_pct >= min_gap_pct and vol_surge:
                 ck = f"{symbol}|{period_label}|跳空下跌|{bar_date}"
                 if ck not in st.session_state.sent_alerts:
                     st.session_state.sent_alerts.add(ck)
-                    tags = [f"缺口-{gap_dn_pct:.2f}%", f"量×{vol_ratio:.1f}"]
-                    if vol_strong:    tags.append("強放量")
-                    if is_bear_bar:   tags.append("陰線確認")
-                    if in_bear_trend: tags.append("空頭趨勢")
-                    strength = "🔴 【強烈賣出】" if vol_strong and is_bear_bar else "🟠 【賣出訊號】"
-                    add_alert(symbol, period_label,
-                              f"{strength}跳空下跌 -{gap_dn_pct:.2f}%"
-                              f"（開{b_open:.2f} 前低{p_low:.2f}）"
-                              f" 放量×{vol_ratio:.1f}｜{'＋'.join(tags)}", "bear")
-                    new_signals.append(f"跳空下跌{gap_dn_pct:.2f}%")
+                    if is_latest:
+                        tags = [f"缺口-{gap_dn_pct:.2f}%", f"量×{vol_ratio:.1f}"]
+                        if vol_strong:    tags.append("強放量")
+                        if is_bear_bar:   tags.append("陰線確認")
+                        if in_bear_trend: tags.append("空頭趨勢")
+                        strength = "🔴 【強烈賣出】" if vol_strong and is_bear_bar else "🟠 【賣出訊號】"
+                        add_alert(symbol, period_label,
+                                  f"{strength}跳空下跌 -{gap_dn_pct:.2f}%"
+                                  f"（開{b_open:.2f} 前低{p_low:.2f}）"
+                                  f" 放量×{vol_ratio:.1f}｜{'＋'.join(tags)}", "bear")
+                        new_signals.append(f"跳空下跌{gap_dn_pct:.2f}%")
 
         # ── F4. 缺口回補測試（固定看最新根）─────────────────────────────────
         curr_low = float(low.iloc[-1])
