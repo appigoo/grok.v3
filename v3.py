@@ -1771,7 +1771,63 @@ def add_alert(symbol: str, period: str, msg: str, atype: str = "info"):
 # 延長時段數據（盤前 Pre-market / 盤後 After-hours / 夜盤）
 # ══════════════════════════════════════════════════════════════════════════════
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=90)   # 延長至 90 秒，減少 429
+def _yahoo_chart_api(symbol: str, interval: str, range_str: str) -> dict:
+    """
+    底層 Yahoo Finance Chart API 請求（含盤前盤後）。
+    所有上層函數共享此快取，避免重複請求同一 endpoint。
+    ttl=90 秒：既保持數據新鮮，又不會因頻繁刷新觸發 429。
+    """
+    url = (
+        f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+        f"?interval={interval}&range={range_str}&includePrePost=true"
+        f"&events=div%2Csplits&corsDomain=finance.yahoo.com"
+    )
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                      "AppleWebKit/537.36 (KHTML, like Gecko) "
+                      "Chrome/122.0 Safari/537.36",
+        "Accept":   "application/json",
+        "Referer":  "https://finance.yahoo.com",
+    }
+    try:
+        resp = requests.get(url, headers=headers, timeout=15)
+        if resp.status_code == 429:
+            return {"error": "Yahoo 請求過於頻繁，請稍後再試", "df": None}
+        if resp.status_code != 200:
+            return {"error": f"Yahoo HTTP {resp.status_code}", "df": None}
+        data  = resp.json()
+        r_lst = data.get("chart", {}).get("result", [])
+        if not r_lst:
+            err = data.get("chart", {}).get("error", {})
+            return {"error": f"Yahoo 無數據: {err}", "df": None}
+        r          = r_lst[0]
+        timestamps = r.get("timestamp", [])
+        quotes     = r.get("indicators", {}).get("quote", [{}])[0]
+        if not timestamps:
+            return {"error": "Yahoo 回傳空時間序列", "df": None}
+        df = pd.DataFrame({
+            "Open":   quotes.get("open",   [None]*len(timestamps)),
+            "High":   quotes.get("high",   [None]*len(timestamps)),
+            "Low":    quotes.get("low",    [None]*len(timestamps)),
+            "Close":  quotes.get("close",  [None]*len(timestamps)),
+            "Volume": quotes.get("volume", [0]*len(timestamps)),
+        }, index=pd.to_datetime(timestamps, unit="s", utc=True))
+        try:
+            import pytz as _ptz
+            df = df.tz_convert(_ptz.timezone("America/New_York"))
+        except Exception:
+            pass
+        df = df.dropna(subset=["Close"])
+        df["Volume"] = df["Volume"].fillna(0).astype(int)
+        df = df.sort_index()
+        return {"error": None, "df": df}
+    except Exception as e:
+        return {"error": str(e), "df": None}
+
+
+
+@st.cache_data(ttl=90)
 def fetch_extended_data(symbol: str) -> dict:
     """
     Fetch pre/post/overnight bars via Yahoo Finance chart API.
@@ -1867,80 +1923,40 @@ def fetch_extended_data(symbol: str) -> dict:
             "date":   str(sdf.index[-1].date()),
         }
 
-    # ── Yahoo Finance Chart API (no key needed) ───────────────────────────────
-    # Interval 1m with range 5d + includePrePost=True
-    try:
-        url = (
-            f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
-            f"?interval=1m&range=5d&includePrePost=true"
-            f"&events=div%2Csplits&corsDomain=finance.yahoo.com"
-        )
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                          "AppleWebKit/537.36 (KHTML, like Gecko) "
-                          "Chrome/122.0 Safari/537.36",
-            "Accept": "application/json",
-            "Referer": "https://finance.yahoo.com",
-        }
-        resp = requests.get(url, headers=headers, timeout=15)
+    # ── 使用共享快取層，避免重複請求同一 endpoint 觸發 429 ───────────────────
+    api_result = _yahoo_chart_api(symbol, "1m", "5d")
 
-        if resp.status_code == 200:
-            data   = resp.json()
-            chart  = data.get("chart", {})
-            result_data = chart.get("result", [])
-            if not result_data:
-                err = chart.get("error", {})
-                result["error"] = f"Yahoo 無數據: {err}"
-                return result
+    if api_result["error"]:
+        result["error"] = api_result["error"]
+        return result
 
-            r          = result_data[0]
-            timestamps = r.get("timestamp", [])
-            quotes     = r.get("indicators", {}).get("quote", [{}])[0]
+    df = api_result["df"]
+    if df is None or df.empty:
+        result["error"] = "Yahoo 回傳空數據"
+        return result
 
-            if not timestamps:
-                result["error"] = "Yahoo 回傳空時間序列"
-                return result
+    df = _to_et(df)
+    df = df.dropna(subset=["Close"])
+    df["Volume"] = df["Volume"].fillna(0).astype(int)
 
-            df = pd.DataFrame({
-                "Open":   quotes.get("open",   [None]*len(timestamps)),
-                "High":   quotes.get("high",   [None]*len(timestamps)),
-                "Low":    quotes.get("low",    [None]*len(timestamps)),
-                "Close":  quotes.get("close",  [None]*len(timestamps)),
-                "Volume": quotes.get("volume", [0]*len(timestamps)),
-            }, index=pd.to_datetime(timestamps, unit="s", utc=True))
+    sessions  = _split_sessions(df)
+    reg       = sessions["regular"]
+    reg_close = float(reg["Close"].iloc[-1]) if not reg.empty else None
 
-            df = _to_et(df)
-            df = df.dropna(subset=["Close"])
-            df["Volume"] = df["Volume"].fillna(0).astype(int)
-
-            sessions  = _split_sessions(df)
-            reg       = sessions["regular"]
-            reg_close = float(reg["Close"].iloc[-1]) if not reg.empty else None
-
-            has_ext = not sessions["pre"].empty or not sessions["post"].empty
-            result.update({
-                "pre":            sessions["pre"],
-                "post":           sessions["post"],
-                "overnight":      sessions["overnight"],
-                "regular":        reg,
-                "pre_info":       _summary(sessions["pre"],       reg_close),
-                "post_info":      _summary(sessions["post"],      reg_close),
-                "overnight_info": _summary(sessions["overnight"], reg_close),
-                "regular_info":   _summary(reg),
-                "reg_close":      reg_close,
-                "trading_date":   sessions.get("trading_date", ""),
-                "source":         "Yahoo Finance" + (" (含延長時段)" if has_ext else " (僅正規盤)"),
-            })
-            return result
-
-        elif resp.status_code == 429:
-            result["error"] = "Yahoo 請求過於頻繁，請稍後再試"
-        else:
-            result["error"] = f"Yahoo HTTP {resp.status_code}"
-
-    except Exception as e:
-        result["error"] = str(e)
-
+    has_ext = not sessions["pre"].empty or not sessions["post"].empty
+    result.update({
+        "pre":            sessions["pre"],
+        "post":           sessions["post"],
+        "overnight":      sessions["overnight"],
+        "regular":        reg,
+        "pre_info":       _summary(sessions["pre"],       reg_close),
+        "post_info":      _summary(sessions["post"],      reg_close),
+        "overnight_info": _summary(sessions["overnight"], reg_close),
+        "regular_info":   _summary(reg),
+        "reg_close":      reg_close,
+        "trading_date":   sessions.get("trading_date", ""),
+        "source":         "Yahoo Finance" + (" (含延長時段)" if has_ext else " (僅正規盤)"),
+    })
     return result
 
 
@@ -2115,58 +2131,20 @@ def render_extended_session(symbol: str, show_pre: bool, show_post: bool, show_n
         '</div></div>',
         unsafe_allow_html=True)
 
-@st.cache_data(ttl=60)
+
+@st.cache_data(ttl=90)
 def fetch_data(symbol: str, interval: str, prepost: bool = False) -> pd.DataFrame:
     _, period = INTERVAL_MAP[interval]
 
-    # 分鐘級別 + 開啟延長時段 → 用 Yahoo Chart API 直接抓含盤前盤後的完整數據
+    # 分鐘級別 + 開啟延長時段 → 共享快取的 Yahoo Chart API
     if prepost and interval in ("1m", "5m", "15m", "30m"):
-        try:
-            yf_interval = interval  # 1m, 5m, 15m, 30m
-            yf_range    = {"1m": "5d", "5m": "5d", "15m": "10d", "30m": "20d"}.get(interval, "5d")
-            url = (
-                f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
-                f"?interval={yf_interval}&range={yf_range}&includePrePost=true"
-                f"&events=div%2Csplits&corsDomain=finance.yahoo.com"
-            )
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                              "AppleWebKit/537.36 (KHTML, like Gecko) "
-                              "Chrome/122.0 Safari/537.36",
-                "Accept": "application/json",
-                "Referer": "https://finance.yahoo.com",
-            }
-            resp = requests.get(url, headers=headers, timeout=15)
-            if resp.status_code == 200:
-                data = resp.json()
-                r    = data.get("chart", {}).get("result", [])
-                if r:
-                    r = r[0]
-                    timestamps = r.get("timestamp", [])
-                    quotes     = r.get("indicators", {}).get("quote", [{}])[0]
-                    if timestamps:
-                        df = pd.DataFrame({
-                            "Open":   quotes.get("open",   [None]*len(timestamps)),
-                            "High":   quotes.get("high",   [None]*len(timestamps)),
-                            "Low":    quotes.get("low",    [None]*len(timestamps)),
-                            "Close":  quotes.get("close",  [None]*len(timestamps)),
-                            "Volume": quotes.get("volume", [0]*len(timestamps)),
-                        }, index=pd.to_datetime(timestamps, unit="s", utc=True))
-                        # 轉換到 ET 時區
-                        try:
-                            import pytz as _ptz
-                            df = df.tz_convert(_ptz.timezone("America/New_York"))
-                        except Exception:
-                            pass
-                        df = df.dropna(subset=["Close"])
-                        df["Volume"] = df["Volume"].fillna(0).astype(int)
-                        df = df.sort_index()
-                        if not df.empty:
-                            return df
-        except Exception:
-            pass  # fallback to yf.download below
+        yf_range = {"1m": "5d", "5m": "5d", "15m": "10d", "30m": "20d"}.get(interval, "5d")
+        result   = _yahoo_chart_api(symbol, interval, yf_range)
+        if result["df"] is not None and not result["df"].empty:
+            return result["df"]
+        # 429 或失敗時 fallback（不再重試，避免加重限流）
 
-    # 標準抓取（日K/週K/月K 或 prepost=False）
+    # 標準抓取（日K/週K/月K 或 prepost=False 或 API 失敗 fallback）
     try:
         df = yf.download(symbol, period=period, interval=interval,
                          auto_adjust=True, progress=False)
