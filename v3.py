@@ -2915,6 +2915,40 @@ def run_alerts(symbol, period_label, df, trigger_ai=False, mkt=None):
             is_bear_bar = b_close < b_open
             bar_date    = _bar_date(df.index[bar_i])
 
+            # ── F0. 超級跳空（財報/重大消息級別）───────────────────────────
+            # 條件：跳空幅度 ≥ 5% 且 量能 ≥ 5x，屬於機構強制重新定價
+            _e200 = float(calc_ema(close, 200).iloc[bar_i]) if len(close) >= 200 else None
+            _e20  = float(calc_ema(close, 20).iloc[bar_i])
+            _above_e200 = (_e200 is not None) and (b_open > _e200)
+            _above_e20  = b_open > _e20
+
+            if gap_up_pct >= 5.0 and vol_ratio >= 5.0:
+                ck = f"{symbol}|{period_label}|超級跳空上漲|{bar_date}"
+                if ck not in st.session_state.sent_alerts:
+                    st.session_state.sent_alerts.add(ck)
+                    if is_latest:
+                        tags = [f"跳空+{gap_up_pct:.1f}%", f"量×{vol_ratio:.0f}"]
+                        if _above_e200: tags.append("突破EMA200長線")
+                        if _above_e20:  tags.append("突破EMA20中線")
+                        if b_close > b_open * 1.02: tags.append("強收陽線")
+                        add_alert(symbol, period_label,
+                                  f"🚀🚀 【財報級跳空】超級跳空上漲 +{gap_up_pct:.1f}%"
+                                  f"（開{b_open:.2f} 前高{p_high:.2f}）"
+                                  f" 量爆×{vol_ratio:.0f}｜{'＋'.join(tags)}"
+                                  f"，可能為財報/重大消息，注意追高風險！", "bull")
+                        new_signals.append(f"超級跳空+{gap_up_pct:.1f}%")
+
+            elif gap_dn_pct >= 5.0 and vol_ratio >= 5.0:
+                ck = f"{symbol}|{period_label}|超級跳空下跌|{bar_date}"
+                if ck not in st.session_state.sent_alerts:
+                    st.session_state.sent_alerts.add(ck)
+                    if is_latest:
+                        add_alert(symbol, period_label,
+                                  f"💀💀 【財報級跳空】超級跳空下跌 -{gap_dn_pct:.1f}%"
+                                  f"（開{b_open:.2f} 前低{p_low:.2f}）"
+                                  f" 量爆×{vol_ratio:.0f}｜嚴重崩跌，避免接刀！", "bear")
+                        new_signals.append(f"超級跳空下跌{gap_dn_pct:.1f}%")
+
             # ── F1. 向上跳空 + 放量 ──────────────────────────────────────
             if gap_up_pct >= min_gap_pct and vol_surge:
                 ck = f"{symbol}|{period_label}|跳空上漲|{bar_date}"
