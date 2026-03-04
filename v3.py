@@ -3606,13 +3606,13 @@ def build_chart(symbol, df, interval_label, compact=False, max_bars=90, ext_data
 # ══════════════════════════════════════════════════════════════════════════════
 # 多週期摘要列
 # ══════════════════════════════════════════════════════════════════════════════
-def render_mtf_summary(symbol, selected_intervals, show_alerts):
+def render_mtf_summary(symbol, selected_intervals, show_alerts, prepost=False):
     st.markdown(f'<div class="mtf-section-title">🔀 多週期總覽 — {symbol}</div>',
                 unsafe_allow_html=True)
     rows = []
     for itvl in selected_intervals:
         label, _ = INTERVAL_MAP[itvl]
-        df = fetch_data(symbol, itvl)
+        df = fetch_data(symbol, itvl, prepost=prepost)
         if df.empty:
             rows.append(
                 f'<div class="mtf-header"><span class="mtf-period">{label}</span>'
@@ -3680,7 +3680,7 @@ def render_mtf_summary(symbol, selected_intervals, show_alerts):
 # ══════════════════════════════════════════════════════════════════════════════
 # 多週期 K 線圖
 # ══════════════════════════════════════════════════════════════════════════════
-def render_mtf_charts(symbol, selected_intervals, layout_mode, max_bars=90):
+def render_mtf_charts(symbol, selected_intervals, layout_mode, max_bars=90, prepost=False):
     if not selected_intervals:
         st.info("請至少選擇一個時間週期")
         return
@@ -3693,7 +3693,7 @@ def render_mtf_charts(symbol, selected_intervals, layout_mode, max_bars=90):
             cols = st.columns(len(pair))
             for col, itvl in zip(cols, pair):
                 label, _ = INTERVAL_MAP[itvl]
-                df = fetch_data(symbol, itvl)
+                df = fetch_data(symbol, itvl, prepost=prepost)
                 with col:
                     if df.empty:
                         st.error(f"{label} 無數據")
@@ -3706,7 +3706,7 @@ def render_mtf_charts(symbol, selected_intervals, layout_mode, max_bars=90):
     else:
         for itvl in selected_intervals:
             label, _ = INTERVAL_MAP[itvl]
-            df = fetch_data(symbol, itvl)
+            df = fetch_data(symbol, itvl, prepost=prepost)
             if df.empty:
                 st.error(f"{label} 無數據")
             else:
@@ -3944,11 +3944,12 @@ for tab, symbol in zip(stock_tabs, symbols):
             if not selected:
                 st.warning("⚠️ 請在左側至少勾選一個時間週期")
             else:
+                _mtf_prepost = show_pre or show_post or show_night
                 # ① 多週期摘要
-                render_mtf_summary(symbol, selected, show_alerts)
+                render_mtf_summary(symbol, selected, show_alerts, prepost=_mtf_prepost)
                 st.markdown("---")
                 # ② 多週期 K 線圖
-                render_mtf_charts(symbol, selected, layout_mode, max_bars=max_bars)
+                render_mtf_charts(symbol, selected, layout_mode, max_bars=max_bars, prepost=_mtf_prepost)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # ══════════════════════════════════════════════════════════════════════════════
