@@ -2115,19 +2115,65 @@ def render_extended_session(symbol: str, show_pre: bool, show_post: bool, show_n
         '</div></div>',
         unsafe_allow_html=True)
 
+@st.cache_data(ttl=60)
 def fetch_data(symbol: str, interval: str, prepost: bool = False) -> pd.DataFrame:
     _, period = INTERVAL_MAP[interval]
+
+    # 分鐘級別 + 開啟延長時段 → 用 Yahoo Chart API 直接抓含盤前盤後的完整數據
+    if prepost and interval in ("1m", "5m", "15m", "30m"):
+        try:
+            yf_interval = interval  # 1m, 5m, 15m, 30m
+            yf_range    = {"1m": "5d", "5m": "5d", "15m": "10d", "30m": "20d"}.get(interval, "5d")
+            url = (
+                f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+                f"?interval={yf_interval}&range={yf_range}&includePrePost=true"
+                f"&events=div%2Csplits&corsDomain=finance.yahoo.com"
+            )
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                              "AppleWebKit/537.36 (KHTML, like Gecko) "
+                              "Chrome/122.0 Safari/537.36",
+                "Accept": "application/json",
+                "Referer": "https://finance.yahoo.com",
+            }
+            resp = requests.get(url, headers=headers, timeout=15)
+            if resp.status_code == 200:
+                data = resp.json()
+                r    = data.get("chart", {}).get("result", [])
+                if r:
+                    r = r[0]
+                    timestamps = r.get("timestamp", [])
+                    quotes     = r.get("indicators", {}).get("quote", [{}])[0]
+                    if timestamps:
+                        df = pd.DataFrame({
+                            "Open":   quotes.get("open",   [None]*len(timestamps)),
+                            "High":   quotes.get("high",   [None]*len(timestamps)),
+                            "Low":    quotes.get("low",    [None]*len(timestamps)),
+                            "Close":  quotes.get("close",  [None]*len(timestamps)),
+                            "Volume": quotes.get("volume", [0]*len(timestamps)),
+                        }, index=pd.to_datetime(timestamps, unit="s", utc=True))
+                        # 轉換到 ET 時區
+                        try:
+                            import pytz as _ptz
+                            df = df.tz_convert(_ptz.timezone("America/New_York"))
+                        except Exception:
+                            pass
+                        df = df.dropna(subset=["Close"])
+                        df["Volume"] = df["Volume"].fillna(0).astype(int)
+                        df = df.sort_index()
+                        if not df.empty:
+                            return df
+        except Exception:
+            pass  # fallback to yf.download below
+
+    # 標準抓取（日K/週K/月K 或 prepost=False）
     try:
-        # 分鐘/小時級別支援盤前盤後，日K以上不需要
-        _prepost = prepost and interval in ("1m","5m","15m","30m","1h","2h","4h")
         df = yf.download(symbol, period=period, interval=interval,
-                         auto_adjust=True, progress=False,
-                         prepost=_prepost)
+                         auto_adjust=True, progress=False)
         if df.empty:
             return pd.DataFrame()
         df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
         df.dropna(inplace=True)
-        # 確保時間排序正確（盤前數據時間早於正規時段）
         df = df.sort_index()
         return df
     except Exception:
