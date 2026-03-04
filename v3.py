@@ -3691,8 +3691,12 @@ with st.sidebar:
     st.title("📈 美股監控系統")
     st.markdown("---")
 
-    raw_input = st.text_area("股票代號（逗號分隔）", value="TSLA", height=80)
-    symbols   = [s.strip().upper() for s in raw_input.replace("，",",").split(",") if s.strip()]
+    raw_input = st.text_area("股票代號（空格分隔）", value="TSLA AAPL NVDA", height=80)
+    # 同時支援空格、逗號、換行、全形逗號分隔
+    import re as _re
+    symbols = [s.strip().upper() for s in _re.split(r'[\s,，\n]+', raw_input) if s.strip()]
+    # 過濾非法代號（只允許字母和.）
+    symbols = [s for s in symbols if _re.match(r'^[A-Z\.\-]{1,10}$', s)]
 
     st.markdown("---")
     st.markdown("#### 📅 監控模式")
@@ -3798,7 +3802,12 @@ with st.sidebar:
 st.title("🇺🇸 美股即時監控系統")
 
 if not symbols:
-    st.info("請在左側輸入股票代號")
+    st.info("👈 請在左側輸入股票代號（例如：TSLA AAPL NVDA）")
+    # 空白時也要停止自動刷新，否則會空跑
+    if auto_refresh:
+        time.sleep(refresh_sec)
+        st.cache_data.clear()
+        st.rerun()
     st.stop()
 
 # ── 市場環境面板（置頂）──────────────────────────────────────────────────────
